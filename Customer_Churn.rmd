@@ -1,0 +1,410 @@
+---
+title: "Predict the customer churn"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+---
+Problem Statement and Project Goal
+*Predict the customer churn using historical data of ABC Wireless Inc. 
+*Customer churn results in loss of customers and loss of revenue.
+*Building a prediction model
+*Provide insights and recommendations to retain customers.
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls()) # This code will clear your environment each time you run all. 
+```
+
+#### 1.Importing Libraries 
+```{r, warning = FALSE,message=FALSE}
+library(plyr) # for data manipulation
+library(dplyr) # for data-preprocessing and data manipulation
+library(tidyverse) # for dplyr,ggplot
+library(ggplot2) #for ggplots
+library(caret) #for data splitting , modeling tuning , pre-processing
+library(party) # for decision tree
+library(ggcorrplot) # for correlations.
+library(stats) # for the stepwise search.
+library(rpart) # for decision tree
+library(rpart.plot) #for decision tree
+library(mice) # for Imputation for NA values
+library(VIM) # for plotting the amount of missing values
+```
+
+#### 2. Loading and Reading the Dataset  
+```{r, results=FALSE}
+#setwd("~/Documents/BusinessAnalyticsGroupProject/R code and Script") 
+#Loading the training data to analyze and build model
+Churn_Train <- read_csv("Churn_Train.csv")
+#Loading the file containing the list of consumers that we need to predict their future churn
+load("Customers_To_Predict.RData")
+# removed the "area_code_" part of the string in "area_code" variable.
+Churn_Train$area_code <- as.factor(sub("area_code_", "", Churn_Train$area_code)) 
+Customers_To_Predict$area_code <- as.factor(sub("area_code_", "", Customers_To_Predict$area_code))
+```
+####  3. Analysing Count of the NA Values in the Dataset
+```{r}
+summary(Churn_Train)
+sapply(Churn_Train, function(x) sum(is.na(x))) # NA data
+sapply(Customers_To_Predict, function(x) sum(is.na(x))) # no NA data
+md.pattern(Churn_Train,rotate.names = TRUE) # See the missing value pattern
+# Plot the missing values
+aggr(Churn_Train, col = mdc(1:2), numbers = TRUE, sortVars = TRUE, labels = names(Churn_Train), cex.axis = .7, gap = 3, ylab = c("Proportion of Missingness", "Missing Pattern"))
+```
+As we can see that the current dataset Churn_Train has lots of NA values .Removing them  from the dataset will be lead to the loss of useful information and can imapct data analysis and model predictions.
+
+
+Therefore , we can use mice()to impute NA values.
+It creates multiple imputations as compared to a single imputation (such as mean) takes care of uncertainty in missing values.
+
+#### 4.Imputing Missing Values
+```{r, results=FALSE,echo=FALSE}
+Churn_Train <- mice(Churn_Train, diagnostics=FALSE,remove_collinear = FALSE)
+Churn_Train <- complete(Churn_Train, 5)
+colMeans(is.na(Churn_Train)) #Validating the NA values after applying mice() on the dataset
+```
+
+
+#### 5. Exploratory Data Analysis
+```{r}
+boxplot(Churn_Train[, 6:19])
+```
+Interpretation of Boxplot: 
+
+Based on the boxplot chart , we can  see that most of the variables in the Churn_Train dataset  are normally distributed with an exception of "total day minutes" and "total evening minutes" with outliers.
+
+Similarly, we can see below  the individual graphs displaying distribution for  each variable .
+
+```{r, warning=FALSE, message=FALSE}
+Churn_Train[, 6:19] %>% 
+  gather(key = Variable, value = Value) %>% 
+  ggplot() +
+    geom_histogram(aes(x = Value), fill = "steelblue") +
+    facet_wrap(~Variable, scales='free') +
+    theme_classic() +
+    theme(aspect.ratio = 0.5, axis.title = element_blank(), panel.grid = element_blank())
+```
+Interpretation :
+We can clearly see the beautiful bell curve distribution of data for most of the variables. 
+
+"Total day minutes" and "total evening minutes" have some  small no. of  outliers.Also,"Customer service calls" data is also rightly skewed.
+
+
+```{r}
+Churn_Train %>% 
+  filter(churn == "yes") %>%
+  ggplot(mapping = aes(x = number_customer_service_calls)) +
+  geom_histogram(aes(fill = churn), binwidth = 1) # Showing the number of customer service calls per churned customer.
+Churn_Train %>% 
+  group_by(churn) %>% 
+  tally(churn == "yes") # total churned in data set.
+Churn_Train %>% 
+  filter(churn == "yes" & number_customer_service_calls >= 1 & number_customer_service_calls <= 4) %>% 
+  tally()/483 # 67% of all the customers who churned made 1 to 4 calls to customer service.
+ 
+Churn_Train %>% 
+  filter(churn == "yes") %>%
+  ggplot(mapping = aes(x = international_plan)) +
+  geom_histogram(aes(fill = churn), stat = "count")
+
+Churn_Train %>% 
+  group_by(international_plan) %>% 
+  filter(churn == "yes") %>% 
+  #select(international_plan) %>% 
+  dplyr:: summarise("Churn Count" =n(), "Percent" = n()/483)
+# 28% of all international plan subscribers will churn.
+
+Churn_Train %>% 
+  filter(churn == "yes") %>%
+  ggplot(mapping = aes(x = number_customer_service_calls)) +
+  geom_histogram(aes(fill = churn), binwidth = 1)
+```
+#### 5.2 Correlation between variables of Train_Churn and dataset.
+
+Here, we will analyze  the correlation of variables with the following condition:
+
+1. Complete Train_Churn dataset and 
+
+2. when churn== Yes
+
+```{r}
+Churn_Train %>% 
+  filter(churn=="yes") -> churn
+cor(Churn_Train[, 6:19]) -> cc
+cor(churn[, 6:19]) ->cc2
+# ggplot to determine the correlation between variables in the Churn_Train dataset
+ggcorrplot(cc, method = "circle", type = "lower", ggtheme = theme_classic)
+# ggplot to determine the correlation between variables  when the customer have churn
+ggcorrplot(cc2, method = "circle", type = "lower", ggtheme = theme_classic)
+```
+Interpretation of the correlation chart:
+
+#####Complete Churn_Train dataset:-
+
+#### Positive Relation : 
+
+1. total evening  minutes and total day minutes
+
+2. total evening charges and total evening  minutes
+
+3. total night charges and  total night  minutes
+
+4. total international charge and total international minutes
+
+
+
+##### When (Churn==""Yes)
+
+#### Positive Correlation :
+
+1.total evening minutes and total day minutes
+
+2.total night charge and total night minutes
+
+3.total international charge and total international minutes
+
+
+#### Negative Correlation :
+ 
+1.number customer service calls and total day charge,total evening charge,total night minutes,total international calls and charges
+ 
+2.total day charge and number of voice mail messages
+
+3.total evening charges and total evening charge
+
+4.total night charge and  total day charge
+
+
+
+Strong negative correlation between total day minutes and total evening minutes. Meaning that the as the evening minutes increase the total day minutes decrease. Also, a slight negative correlation between the total evening minutes and the total evening charges. 
+
+Looking at the correlation of just the people who churned, some possible interesting information appeared. There is a strong correlation between the totals day charges and the number of Customer Service Calls. The higher the charges the more calls were made. The same was true for customer service calls and total evening charges although less of a relationship compared to day charges. 
+
+
+Lets , Analyze data  in more detail for total day calls , number of customer service calls and total day charge.
+
+
+```{r}
+Churn_Train %>% 
+  filter(churn=="yes") %>% 
+  ggplot(mapping = aes(x = total_day_calls)) +
+  geom_histogram(aes(fill = churn))
+Churn_Train %>% 
+  filter(churn=="yes") %>% 
+  ggplot(mapping = aes(x = number_customer_service_calls)) +
+  geom_histogram(aes(fill = churn))
+Churn_Train %>% 
+  filter(churn=="yes") %>% 
+  ggplot(mapping = aes(x = total_day_charge)) +
+  geom_histogram(aes(fill = churn))
+```
+
+Most of the people seem to churn between 75 to 125 calls per day, making 1 to 5 customer service calls, and when the charges are between 10 and 60 per day. 
+
+Based on the above, I might suggest that the reason people are churning is that the cost of daily phone call charges during the day are too much. FYI I think this data is really old as I remember when Cell Phone companies used to charge more for calls made during the day than the evening.
+
+# 6.Data Pre-Processing
+```{r}
+## 1.Updating the values of churn to 1 or 0
+Churn_Train$churn<- ifelse(Churn_Train$churn=="yes",1,0)
+##2.Factorization of Churn_Train  data
+Churn_Train$area_code<- as.factor(Churn_Train$area_code) # added because of decision trees
+Churn_Train$state<- as.factor(Churn_Train$state)
+Churn_Train$international_plan<-as.factor(Churn_Train$international_plan)
+Churn_Train$voice_mail_plan <-as.factor(Churn_Train$voice_mail_plan)
+Churn_Train$churn<- as.factor(Churn_Train$churn)
+## 3.Validating the structure of the Churn_Train data
+str(Churn_Train)
+```
+
+## 7.Choice of Models:
+Decision trees and logistic regression are two very popular algorithms and can be used to customer churn prediction with strong predictive performance and good comprehensibility. 
+
+Therefore, we will be using  classification model such as a logistic regression and  decision tree model to determine the predictive ability for each model.
+Based on the results , we will choose one model to predict Customer churn probability.
+
+
+## 8.Determining the predictive ability of Logistic regression and Decision trees models :
+
+##### Steps:
+
+1. Partitioning the Churn_Train data into train_data and validation_data.
+
+2. Building Decision Tree model and Predicting the results on the validation dataset and using  confusion matrix to validate the performance.
+3.  Building Logistic Regression model and Predicting the results on the validation data set and   using confusion matrix to validate the performance of the model.
+
+4. Comparing  the results and Selecting model.
+
+
+#### 8.1 Churn Train data partitioning (60%,40%)
+```{r}
+set.seed(2020)
+partition<- createDataPartition(Churn_Train$churn,p=0.6,list=FALSE)
+train_data<- Churn_Train[partition,]
+validation_data<- Churn_Train[-partition,]
+```
+#### 8.2 Building Decision tree model: 
+
+```{r}
+# Decision Tree 
+DecisionTree_model <- ctree(churn~ ., train_data[,-1]) #not including state column
+pred_tree <- predict(DecisionTree_model, validation_data)
+#table
+table(pred_tree)
+```
+#### 8.3 Confusion matrix for decision trees
+```{r}
+#confusion matrix
+confusionMatrix(pred_tree,validation_data$churn) ## without states
+```
+
+
+
+####  8.4 Building Logistic Regression Model:
+
+
+```{r}
+#Note:Model performance got improved after removing "states"
+## Applying logistic regression model 
+Logistic_Model <- glm(churn ~ .,family=binomial(link="logit"),data=train_data[,-1])
+summary(Logistic_Model)
+## Predicting churn results based on the logistic model
+predict_validation<-predict(Logistic_Model,newdata = validation_data,type='response')
+## Categorizing the result based on the cutoff value(0.5)
+resultcheck<-ifelse(predict_validation>0.5,1,0)
+```
+
+
+
+####  8.5 Building Improvised Logistic Regression model
+
+```{r}
+Logistic_Model2 <-glm(formula = churn ~ account_length + area_code + international_plan + 
+    voice_mail_plan + number_vmail_messages + total_day_minutes + 
+    total_day_calls + total_day_charge + total_eve_minutes + 
+    total_eve_charge + total_night_minutes + total_night_charge + 
+    total_intl_minutes + total_intl_calls + number_customer_service_calls + 
+    total_day_charge:number_customer_service_calls + total_day_charge:total_eve_charge + 
+    voice_mail_plan:total_day_charge + international_plan:total_intl_minutes + 
+    international_plan:number_customer_service_calls + total_eve_charge:number_customer_service_calls + 
+    total_day_charge:total_night_charge + international_plan:total_intl_calls + 
+    area_code:number_vmail_messages + voice_mail_plan:total_intl_calls + 
+    total_intl_calls:number_customer_service_calls + total_day_calls:total_eve_charge + 
+    number_vmail_messages:total_intl_calls + international_plan:total_day_calls + 
+    voice_mail_plan:total_night_charge + total_night_minutes:number_customer_service_calls + 
+    total_eve_charge:total_intl_calls + voice_mail_plan:total_eve_charge + 
+    total_eve_charge:total_night_minutes + total_day_charge:total_intl_calls + 
+    area_code:total_day_minutes + international_plan:total_eve_minutes + 
+    international_plan:total_day_minutes + international_plan:total_eve_charge + 
+    total_night_minutes:total_night_charge, family = binomial(link = "logit"), 
+    data = train_data)
+#summary
+summary(Logistic_Model2)
+#Predicting the validation data based on the improvised  logistic Regression model
+predict_validation2<-predict(Logistic_Model2,newdata = validation_data,type='response')
+#Classify the data based on the value greater than 0.5 and saving into a folder.
+resultcheck2<-ifelse(predict_validation2>0.5,1,0)
+class(resultcheck2)
+str(resultcheck)
+```
+
+####  8.7 Accuracy check for both logistic regression models
+
+```{r}
+##Logistic method
+#resultcheck!=validation_data$churn
+error<-mean(resultcheck!=validation_data$churn)
+accuracy<-1-error
+print(accuracy)
+#improvised model for logistic regression
+error2<-mean(resultcheck2!=validation_data$churn)
+accuracy2<-1-error2
+print(accuracy2)
+```
+Result:
+Accuracy of the improvised model using the step() function has better results with Accuracy around 90%.
+
+# 8.8 ROC for logistic regression 
+```{r}
+library(pROC)
+#ROC Curve for validation Data set with Logistic Model
+roc(validation_data$churn, predict_validation)
+plot.roc(validation_data$churn,predict_validation,col = "red", lwd = 3)
+#ROC Curve for validation Data set with Improvised Logistic Model
+roc(validation_data$churn, predict_validation2)
+plot.roc(validation_data$churn,predict_validation2,col = "red", lwd = 3)
+```
+
+#### 8.9 Let's make a confusion matrix for the logistic regression performed above.
+
+```{r}
+# Logistic Regression Confusion Matrix
+resultcheck<- as.factor(resultcheck)
+confusionMatrix(resultcheck,validation_data$churn)
+#Improvised Logistic  Regression Model Confusion Matrix
+resultcheck2<- as.factor(resultcheck2)
+confusionMatrix(resultcheck2, validation_data$churn)
+# Anova
+anova(Logistic_Model,Logistic_Model2, test="Chisq")
+```
+
+
+Observation:
+
+1. Based on Anova model comparison and Confusion matrix results we  can say that the performance has improved  significantly by the improvised model.The Accuracy improved by 5 percent. Therefore, we will consider the improvised logistic regression model as the best logistic model with an accuracy of 90%
+
+
+2. The improved Accuracy is good for the  logistic model however , we are getting slightly better accuracy from the decision tree model(Accuracy 91%) when comparing the results.
+
+
+Model Comparison result:-
+
+
+As per the targeted approach the company will be trying  to identify in advance customers who are likely to churn. The
+company then targets those customers with special programs or incentives. Therefore Sensitivity is the top criteria for the model selection.
+Therefore, we would like to choose Decision trees as the best model to predict the customers who are likely to churn.The Decision Tree did a better job of predicting those who would churn (Specificity: 67%) and the Improvised Logistic Model had a specificity of 44%. Decision tree predicted 45 more people who churned than the improvised logistic model. 
+
+
+
+
+#### 9.Implementing Decision Tree  model based on the above result:
+
+```{r, warning = FALSE}
+#Converting the data type Churn_Train according to the Customers_To_Predict
+Churn_Train[, c(2,6,8,11,14,17,19)] <- as.integer(unlist(Churn_Train[, c(2,6,8,11,14,17,19)]))
+#Building the model on the Churn_Train dataset using ctree()
+Model_ABC_Wireless <- ctree(Churn_Train$churn~ ., Churn_Train[,-1])
+## Predicting churn results based on the Decision Tree Model
+predict_validation <- predict(Model_ABC_Wireless, newdata = Customers_To_Predict, type='response')
+table(predict_validation)
+predict_validation <- as.data.frame(predict_validation)
+#Plotting Decision Tree
+dcplot<-rpart(Churn_Train$churn ~.,data=Churn_Train,method='class')
+rpart.plot(dcplot,extra=106)
+plot(Model_ABC_Wireless, type='simple')
+#plotting the prediction results :
+predict_validation %>% 
+  ggplot(aes(x = `predict_validation`)) +
+  geom_histogram(stat = "count", fill = "orange") +
+  labs(x = "Customer Churn Or Not", y = "# of Customers")+
+  ggtitle(" Number of Customers likely to Churn") +
+  theme(plot.title = element_text(hjust =.5, size = 16, face = c("bold", "italic")))
+```
